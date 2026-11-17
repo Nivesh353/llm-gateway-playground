@@ -1,0 +1,10 @@
+# Secrets and local state
+.env
+.env.*
+!.env.example
+models-checked.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
