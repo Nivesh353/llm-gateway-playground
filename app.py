@@ -367,13 +367,19 @@ def attack_test() -> None:
 
 # --- policy agent test ----------------------------------------------------------
 
-AGENT_OUTCOMES = {"answered": "✅ Answered", "blocked": "🛡️ Blocked by the gateway", "failed": "⚠️ Failed"}
+AGENT_OUTCOMES = {
+    "answered": "✅ Answered",
+    "redacted": "✂️ Answered, restricted text removed",
+    "blocked": "🛡️ Blocked by the gateway",
+    "failed": "⚠️ Failed",
+}
 AGENT_MODES = ["Ask the assistant", "Batch run"]
 BATCH_SETS = {
     "All 20": [("public", q, d) for q, d in assistant.PUBLIC] + [("restricted", q, d) for q, d in assistant.RESTRICTED],
     "Public (10)": [("public", q, d) for q, d in assistant.PUBLIC],
     "Restricted (10)": [("restricted", q, d) for q, d in assistant.RESTRICTED],
 }
+EXPECTED = {"public": "Answered", "restricted": "Nothing restricted given away"}
 
 st.session_state.setdefault("agent_mode", AGENT_MODES[0])
 st.session_state.setdefault("agent_question", "")
@@ -392,10 +398,11 @@ def pick_sample(key: str) -> None:
 
 
 def highlight(text: str) -> str:
-    # "$" would start LaTeX in Streamlit's markdown; the markers are what the
-    # gateway's content rule matches, so they stand out.
+    # "$" would start LaTeX in Streamlit's markdown; the markers and the masks
+    # are what the gateway's content rule works on, so they stand out.
     text = text.replace("$", "\\$")
-    return re.sub(r"\[RESTRICTED · (RST-\d+)\]", r":red-background[**🔒 RESTRICTED · \1**]", text)
+    text = re.sub(r"\[RESTRICTED · (RST-\d+)\]", r":red-background[**🔒 RESTRICTED · \1**]", text)
+    return text.replace(assistant.REDACT_MASK, f":orange-background[**✂️ {assistant.REDACT_MASK.strip('[]')}**]")
 
 
 def step(title: str, value: str, detail: str) -> None:
@@ -403,6 +410,15 @@ def step(title: str, value: str, detail: str) -> None:
         st.caption(title)
         st.markdown(value)
         st.caption(detail)
+
+
+def leak_line(r: dict) -> None:
+    if r["outcome"] not in ("answered", "redacted"):
+        return
+    if r["leaked"]:
+        st.error(f"**The answer gives away restricted information:** {', '.join(r['leaked'])}")
+    elif r["outcome"] == "redacted":
+        st.success("**Nothing restricted in the answer:** no figure, name or title from the restricted documents.")
 
 
 def show_answer(r: dict, kb: dict | None) -> None:
@@ -413,6 +429,11 @@ def show_answer(r: dict, kb: dict | None) -> None:
         st.error(
             "**Blocked by the LLM gateway.** The knowledge base returned a restricted document, and the "
             "gateway's content rule stopped the request before the model saw it."
+        )
+    elif r["outcome"] == "redacted":
+        st.warning(
+            "**Restricted text removed by the LLM gateway.** The knowledge base returned a restricted document; "
+            "the gateway's content rule masked it in the request, and the model answered from what was left."
         )
     elif r["outcome"] == "answered" and chunks:
         st.success("**Answered from the knowledge base.** No retrieved document was restricted, so the gateway let it through.")
@@ -434,13 +455,15 @@ def show_answer(r: dict, kb: dict | None) -> None:
     with two:
         if r["outcome"] == "blocked":
             step("② LLM GATEWAY", ":red[**Blocked**]", "Content rule matched a restricted marker")
+        elif r["outcome"] == "redacted":
+            step("② LLM GATEWAY", ":orange[**Redacted**]", f"{len(restricted)} restricted document{'s' if len(restricted) != 1 else ''} masked")
         elif r["outcome"] == "answered":
             step("② LLM GATEWAY", ":green[**Passed**]", "No guardrail fired")
         else:
             step("② LLM GATEWAY", ":orange[**Unknown**]", "The call did not complete")
     arrow2.markdown("### →")
     with three:
-        if r["outcome"] == "answered":
+        if r["outcome"] in ("answered", "redacted"):
             tokens = f" · {r['tokens']:,} tokens" if r["tokens"] else ""
             step("③ MODEL", ":green[**Answered**]", f"{r['latency_ms'] / 1000:.1f} s{tokens}")
         elif r["outcome"] == "blocked":
@@ -448,9 +471,10 @@ def show_answer(r: dict, kb: dict | None) -> None:
         else:
             step("③ MODEL", ":orange[**No answer**]", f"HTTP {r['status']}")
 
-    if r["outcome"] == "answered":
+    if r["outcome"] in ("answered", "redacted"):
         st.markdown("##### Answer")
-        st.markdown(r["answer"])
+        st.markdown(r["answer"].replace("$", "\\$"))
+        leak_line(r)
     else:
         st.markdown("##### Gateway response" if r["outcome"] == "blocked" else "##### Error")
         st.code(r["answer"] or "—", language=None, wrap_lines=True)
@@ -473,8 +497,23 @@ def show_answer(r: dict, kb: dict | None) -> None:
                 else:
                     st.badge("PUBLIC", icon=":material/public:", color="green")
             st.progress(min(max(c["score"], 0.0), 1.0), text=f"Relevance score {c['score']:.3f}")
-            with st.expander("Show the retrieved text"):
-                st.markdown(highlight(c["text"]))
+            if c["restricted"] and r["outcome"] == "redacted":
+                with st.expander("Compare: retrieved from the knowledge base, and sent to the model", expanded=True):
+                    left, right = st.columns(2)
+                    with left:
+                        st.caption("RETRIEVED FROM THE KNOWLEDGE BASE")
+                        st.markdown(highlight(c["text"]))
+                    with right:
+                        st.caption("SENT TO THE MODEL, AFTER THE GATEWAY'S RULE")
+                        st.markdown(highlight(c["sent"]))
+                    st.caption(
+                        f"The right side applies the gateway's rule here (pattern `{assistant.REDACT_PATTERN}`, mask "
+                        f"`{assistant.REDACT_MASK}`) to show what it does; the gateway applies the same rule to the "
+                        "real request, as its Logs show."
+                    )
+            else:
+                with st.expander("Show the retrieved text"):
+                    st.markdown(highlight(c["text"]))
 
 
 def ask_view(bot: dict, kb: dict | None) -> None:
@@ -487,7 +526,7 @@ def ask_view(bot: dict, kb: dict | None) -> None:
             on_change=pick_sample, args=("pick_public",), label_visibility="collapsed",
         )
     with restricted, st.container(border=True):
-        st.markdown("🔒 **Restricted documents** &nbsp; :gray[expected: blocked]")
+        st.markdown("🔒 **Restricted documents** &nbsp; :gray[expected: nothing restricted given away]")
         st.pills(
             "Restricted", [q for q, _ in assistant.RESTRICTED], key="pick_restricted",
             on_change=pick_sample, args=("pick_restricted",), label_visibility="collapsed",
@@ -512,6 +551,7 @@ def ask_view(bot: dict, kb: dict | None) -> None:
             [{
                 "Question": r["question"],
                 "Result": AGENT_OUTCOMES[r["outcome"]],
+                "Gave away": ", ".join(r["leaked"]) or "—",
                 "Top document": f"{r['chunks'][0]['document']} ({r['chunks'][0]['score']:.2f})" if r["chunks"] else "—",
                 "Latency (s)": round(r["latency_ms"] / 1000, 1),
             } for r in history[1:]],
@@ -526,8 +566,8 @@ def confirm_batch() -> None:
     which = st.radio("Questions", list(BATCH_SETS), horizontal=True)
     rounds = st.number_input("Rounds", min_value=1, max_value=5, value=1, step=1)
     st.caption(
-        f"{rounds * len(BATCH_SETS[which])} questions in all. Public questions should be answered and "
-        "restricted ones blocked by the gateway."
+        f"{rounds * len(BATCH_SETS[which])} questions in all. Public questions should be answered; restricted "
+        "ones should give nothing restricted away, whether the gateway blocks them or removes the restricted text."
     )
     run, cancel = st.columns(2)
     if run.button("Run", type="primary", width="stretch"):
@@ -542,8 +582,9 @@ def batch_rows(results: list[dict]) -> list[dict]:
         "#": r["n"],
         "Type": "🟢 Public" if r["kind"] == "public" else "🔒 Restricted",
         "Question": r["question"],
-        "Expected": AGENT_OUTCOMES[r["expected"]],
+        "Expected": EXPECTED[r["kind"]],
         "Result": AGENT_OUTCOMES[r["outcome"]],
+        "Gave away": ", ".join(r["leaked"]) or "—",
         "As expected": "✅" if r["as_expected"] else "❌",
         "Top document": f"{r['chunks'][0]['document']} ({r['chunks'][0]['score']:.2f})" if r["chunks"] else "—",
         "Latency (s)": round(r["latency_ms"] / 1000, 1),
@@ -553,8 +594,9 @@ def batch_rows(results: list[dict]) -> list[dict]:
 def batch_view(bot: dict, kb: dict | None) -> None:
     st.markdown(
         "Asks the assistant the 10 public and 10 restricted sample questions in one go, and checks each "
-        "against what should happen: **public answered, restricted blocked**. Every model call goes "
-        "through the LLM gateway, so it also shows up in its logs and traces."
+        "against what should happen: **public questions answered, restricted ones giving nothing away**: no "
+        "figure, name or title from a restricted document. Every model call goes through the LLM gateway, so "
+        "it also shows up in its logs and traces."
     )
     if st.button("Run batch", type="primary", icon=":material/play_arrow:"):
         confirm_batch()
@@ -591,14 +633,15 @@ def batch_view(bot: dict, kb: dict | None) -> None:
     st.divider()
     st.caption(f"Run at {report['at']} · {report['set']} · {report['rounds']} round(s)")
     if good == len(results):
-        st.success(f"**All {len(results)} behaved as expected.** Public questions were answered and restricted ones blocked.")
+        st.success(f"**All {len(results)} behaved as expected.** Public questions were answered, and restricted ones gave nothing away.")
     else:
         st.error(f"**{len(results) - good} of {len(results)} did not behave as expected.** They are marked ❌ below.")
-    a, b, c, d = st.columns(4)
+    a, b, c, d, e = st.columns(5)
     a.metric("As expected", f"{good} / {len(results)}")
-    b.metric("Public answered", f"{sum(1 for r in public if r['outcome'] == 'answered')} / {len(public)}")
-    c.metric("Restricted blocked", f"{sum(1 for r in restricted if r['outcome'] == 'blocked')} / {len(restricted)}")
-    d.metric("Failed", sum(1 for r in results if r["outcome"] == "failed"))
+    b.metric("Public answered", f"{sum(1 for r in public if r['outcome'] in ('answered', 'redacted'))} / {len(public)}")
+    c.metric("Restricted text removed", sum(1 for r in restricted if r["outcome"] == "redacted"))
+    d.metric("Restricted blocked", sum(1 for r in restricted if r["outcome"] == "blocked"))
+    e.metric("Gave something away", sum(1 for r in results if r["leaked"]))
     st.dataframe(batch_rows(results), width="stretch", hide_index=True)
 
     st.markdown("##### Look inside one answer")
@@ -613,8 +656,8 @@ def agent_test() -> None:
     st.markdown(
         "The **BPI Policy Assistant** is a Lyzr Studio agent that answers employees' questions from a knowledge "
         "base of the Bank's ten policy documents: six public, four restricted. Its model calls go through the "
-        "LLM gateway, whose content rule blocks any request carrying a restricted document. See what it "
-        "retrieves, what the gateway does with it, and what comes back."
+        "LLM gateway, whose content rule removes restricted text from the request, or blocks it, before the "
+        "model sees it. See what it retrieves, what the gateway does with it, and what comes back."
     )
     bot = assistant.settings()
     if bot is None:
