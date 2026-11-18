@@ -6,10 +6,12 @@ gateway's routing rules and guardrails treat each one.
 | | |
 |---|---|
 | Model picker | the key's chat models, live from the gateway (`GET /v1/models`), grouped by provider and vendor, with search |
-| Samples | which model, a prompt with PII, a gateway question, a prompt injection, an exfiltration attempt |
+| Samples | which model, a prompt with PII, a gateway question, a prompt injection, a jailbreak, an exfiltration attempt |
 | Route | Requested → LLM gateway → Answered by: routed, rerouted by a routing rule, blocked by a guardrail (HTTP 446), or refused by an LLM policy (HTTP 403) |
 | Traces | optional: a root span per call to opencontroller's Observability intake, joined by the gateway's spans, with a link to open it |
 | History | this session's earlier calls |
+| Prompt Attack Test | 50 prompt-injection and jailbreak attacks in ten techniques, a data-exfiltration attempt and an unapproved model, each scored blocked, resisted or complied, against a 95% blocked target |
+| Policy Agent Test | asks a Lyzr Studio agent a question and shows the knowledge base's retrieval, the gateway's verdict and the answer; or runs 10 public and 10 restricted sample questions in a batch, each checked against what should happen |
 
 ## Run
 
@@ -30,6 +32,8 @@ answered an availability check; the picker then hides the ones that failed.
 
 - `app.py`: the page
 - `gateway.py`: the gateway's model list and chat calls, and the trace span
+- `runs.py`: the Prompt Attack Test's attacks and scoring
+- `agent.py`: the Policy Agent Test's calls to the Lyzr agent and its knowledge base
 - `.env.example`: the settings, with no values
 
 Every sample is made up: the names, card number and SSN are test data, and the credentials in the exfiltration
