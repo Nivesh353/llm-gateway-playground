@@ -5,6 +5,10 @@ when an Observability key is set, a root span named "chat" is posted to
 opencontroller's intake for the same trace, so the gateway's spans join it in
 the project. The span never carries the prompt or the reply: the prompt may
 hold the very PII the gateway redacts.
+
+When the page has a signed-in person, every call also carries their ID token
+as a bearer token: a virtual key that trusts the identity provider verifies
+it and records them as the caller, and the span names them as enduser.id.
 """
 
 from __future__ import annotations
@@ -53,6 +57,17 @@ class Config:
     project: str
     service: str
     only: list[str] = field(default_factory=list)
+    # The signed-in person, set by the page after sign-in: their email, and
+    # the ID token the gateway verifies. Empty when sign-in is not set up.
+    user: str = ""
+    token: str = ""
+
+    @property
+    def headers(self) -> dict[str, str]:
+        h = {"x-bf-vk": self.virtual_key}
+        if self.token:
+            h["authorization"] = f"Bearer {self.token}"
+        return h
 
     @property
     def tracing(self) -> bool:
@@ -125,7 +140,7 @@ def _chats(m: dict) -> bool:
 def list_models(cfg: Config) -> list[dict]:
     """The chat models the key may call, as the gateway lists them, with what
     last availability check (models-checked.json) found for each, or None."""
-    req = urllib.request.Request(f"{cfg.gateway}/v1/models", headers={"x-bf-vk": cfg.virtual_key})
+    req = urllib.request.Request(f"{cfg.gateway}/v1/models", headers=cfg.headers)
     with urllib.request.urlopen(req, timeout=20) as res:
         body = json.load(res)
     checks = read_checks()
@@ -171,8 +186,8 @@ def chat(cfg: Config, model: str, prompt: str) -> dict:
         f"{cfg.gateway}/v1/chat/completions",
         data=json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}]}).encode(),
         headers={
+            **cfg.headers,
             "content-type": "application/json",
-            "x-bf-vk": cfg.virtual_key,
             "traceparent": f"00-{trace_id}-{span_id}-01",
         },
         method="POST",
@@ -238,6 +253,9 @@ def _send_span(cfg: Config, trace_id: str, span_id: str, start: int, end: int, m
         attr("demo.model.requested", model),
         attr("http.response.status_code", result["status"]),
     ]
+    # Observability's User column reads enduser.id.
+    if cfg.user:
+        attributes.append(attr("enduser.id", cfg.user))
     if result["answered"]:
         attributes.append(attr("demo.model.answered", result["answered"]))
     if result["blocked"]:

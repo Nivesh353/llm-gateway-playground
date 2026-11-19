@@ -8,6 +8,7 @@ Policy Agent Test's questions to the Lyzr policy agent.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 from datetime import datetime
@@ -17,6 +18,7 @@ import streamlit as st
 import agent as assistant
 import gateway
 import runs
+import signin
 
 # The exfiltration sample's credentials are fake, in AWS's documented example
 # format so the gateway's secrets detector recognises them. They are put
@@ -66,6 +68,12 @@ try:
 except RuntimeError as err:
     st.error(str(err))
     st.stop()
+
+# With sign-in set up, nothing reaches the gateway until someone has signed
+# in: the key then requires their token, the model list included.
+if signin.configured():
+    user, token = signin.require()
+    cfg = dataclasses.replace(cfg, user=user, token=token)
 
 
 @st.cache_data(ttl=300, show_spinner="Asking the gateway which models this key may call…")
@@ -120,11 +128,18 @@ st.caption(
     "guardrails apply, and each call is traced."
 )
 chips = [f"🟢 `{cfg.gateway_host}`", f"🟢 Traces → **{cfg.project}**" if cfg.tracing else "⚪ Traces off"]
+if cfg.user:
+    chips.append(f"👤 Signed in as **{cfg.user}**")
 st.markdown(" &nbsp;·&nbsp; ".join(chips))
 
 # --- models (sidebar) -----------------------------------------------------------
 
 with st.sidebar:
+    if cfg.user:
+        st.caption("SIGNED IN AS")
+        st.markdown(f"**{cfg.user}**")
+        st.button("Log out", on_click=st.logout, width="stretch")
+        st.divider()
     st.header("Models for this key")
     try:
         catalog = models_for_key(cfg.gateway, cfg.virtual_key)

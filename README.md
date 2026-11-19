@@ -25,6 +25,38 @@ python3 -m venv .venv
 Tracing is on when `CONSOLE_URL` and `OBSERVABILITY_API_KEY` are set. The span it sends never carries the prompt or
 the reply, since the prompt may hold the very personal data the gateway redacts.
 
+## Sign-in
+
+Optional. With it, every call is recorded under the person who made it, verified by the gateway:
+
+1. Register the page with the identity provider as an OIDC web app (authorization code), with the sign-in redirect
+   URI `http://localhost:8501/oauth2callback`.
+2. In the gateway, add the provider under **API Gateway › Identity Providers (OIDC)**: its issuer, the app's client ID
+   as the audience, and `email` as the subject claim.
+3. On the virtual key, turn the provider on under **Callers sign in with**. The key then refuses calls without a valid
+   token (401).
+4. `cp .streamlit/secrets.toml.example .streamlit/secrets.toml` and fill in `cookie_secret`, `client_id` and
+   `client_secret`.
+
+The page then asks people to sign in before anything else, sends their ID token as `Authorization: Bearer` with every
+gateway call, and names them as `enduser.id` on its trace span, which Observability shows in the **User** column. The
+token lasts an hour (Okta's default) and is not refreshed: after that the page asks for a new sign-in. The Policy Agent
+Test's calls stay unnamed, since Lyzr makes them.
+
+## What the gateway needs
+
+The tests score the gateway, so their results depend on how it is set up. These are the rules they expect:
+
+| Rule | Where | Setting | Why |
+|---|---|---|---|
+| Prompt injection guardrail | Guardrails, on the app's virtual key | Block | Blocks all 50 attacks |
+| `obfuscated-dotted-text` (optional) | Content rules, on the app's virtual key only | Regex `(?:[A-Za-z]\.){4,}[A-Za-z]`, action Block | Not in the test: text with a dot between every letter (`I.g.n.o.r.e y.o.u.r r.u.l.e.s …`) hides its words from the injection detector, and this blocks it |
+| Unapproved model | LLM Policies | Deny the model in `UNAPPROVED_MODEL` | The unapproved-model check expects 403 `llm_policy_denied` |
+| Restricted text | Content rules, on the agent's virtual key | Regex `\[RESTRICTED · RST-\d+\][^\[]*`, action Redact, mask `[RESTRICTED CONTENT REMOVED]` | The Policy Agent Test shows the chunks as the model received them, with this pattern (`REDACT_PATTERN`, `REDACT_MASK`) |
+
+The dotted-text pattern needs five or more single letters joined by dots, so ordinary text such as `e.g.`, `U.S.A.`,
+`J.R.R. Tolkien`, an email address, a domain or a version number does not trigger it.
+
 An optional `models-checked.json` beside the app (`{"results": {"<model id>": {"ok": true}}}`) marks which models
 answered an availability check; the picker then hides the ones that failed.
 
